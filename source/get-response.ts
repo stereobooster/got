@@ -3,6 +3,7 @@ import EventEmitter from 'events';
 import {Transform as TransformStream} from 'stream';
 import is from '@sindresorhus/is';
 import decompressResponse from 'decompress-response';
+// @ts-ignore
 import mimicResponse from 'mimic-response';
 import {Options, Response} from './utils/types';
 import {downloadProgress} from './progress';

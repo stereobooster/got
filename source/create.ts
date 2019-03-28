@@ -1,13 +1,19 @@
+import { InterfaceWithDefaults } from './../dist/source/utils/types.d';
+import { IncomingMessage } from 'http';
+import { MergedOptions, Options, GotURL, DefaultOptions, CancelableRequest } from './utils/types';
 import * as errors from './errors';
 import asStream from './as-stream';
 import asPromise from './as-promise';
 import {normalizeArguments, preNormalizeArguments} from './normalize-arguments';
 import merge, {mergeOptions, mergeInstances} from './merge';
 import deepFreeze from './utils/deep-freeze';
+import { Duplex } from 'stream';
 
-const getPromiseOrStream = options => options.stream ? asStream(options) : asPromise(options);
+const getPromiseOrStream = (options: MergedOptions) => options.stream ? asStream(options) : asPromise(options);
 
-const aliases = [
+type LowerCaseMethods = 'get' | 'post' | 'put' | 'patch' | 'head' | 'delete';
+
+const aliases: Array<LowerCaseMethods> = [
 	'get',
 	'post',
 	'put',
@@ -16,19 +22,37 @@ const aliases = [
 	'delete'
 ];
 
-const create = defaults => {
+type GotFunction = (url: GotURL, options?: Options) => Duplex | CancelableRequest<IncomingMessage>;
+export interface Got extends GotFunction {
+	'get': GotFunction;
+	'post': GotFunction;
+	'put': GotFunction;
+	'patch': GotFunction;
+	'head': GotFunction;
+	'delete': GotFunction;
+	stream: {
+		'get': GotFunction;
+		'post': GotFunction;
+		'put': GotFunction;
+		'patch': GotFunction;
+		'head': GotFunction;
+		'delete': GotFunction;
+	}
+}
+
+const create = (defaults: DefaultOptions): Got => {
 	defaults = merge({}, defaults);
 	preNormalizeArguments(defaults.options);
 
 	if (!defaults.handler) {
 		// This can't be getPromiseOrStream, because when merging
 		// the chain would stop at this point and no further handlers would be called.
-		defaults.handler = (options, next) => next(options);
+		defaults.handler = <T>(options: MergedOptions, next: (_: MergedOptions) => T) => next(options);
 	}
 
-	function got(url, options?: any) {
+	function got(url: GotURL, options?: Options) {
 		try {
-			return defaults.handler(normalizeArguments(url, options, defaults), getPromiseOrStream);
+			return defaults.handler!(normalizeArguments(url, options, defaults), getPromiseOrStream);
 		} catch (error) {
 			if (options && options.stream) {
 				throw error;
@@ -36,10 +60,10 @@ const create = defaults => {
 				return Promise.reject(error);
 			}
 		}
-	}
+	};
 
 	got.create = create;
-	got.extend = options => {
+	got.extend = (options: Options) => {
 		let mutableDefaults;
 		if (options && Reflect.has(options, 'mutableDefaults')) {
 			mutableDefaults = options.mutableDefaults;
@@ -55,13 +79,15 @@ const create = defaults => {
 		});
 	};
 
-	got.mergeInstances = (...args) => create(mergeInstances(args));
+	got.mergeInstances = (...args:InterfaceWithDefaults[]) => create(mergeInstances(args));
 
-	got.stream = (url, options?: any) => got(url, {...options, stream: true});
+	got.stream = (url: GotURL, options?: Options) => got(url, {...options, stream: true});
 
 	for (const method of aliases) {
-		got[method] = (url, options?: any) => got(url, {...options, method});
-		got.stream[method] = (url, options?: any) => got.stream(url, {...options, method});
+		// @ts-ignore
+		got[method] = (url: GotURL, options?: Options) => got(url, {...options, method});
+		// @ts-ignore
+		got.stream[method] = (url: GotURL, options?: Options) => got.stream(url, {...options, method});
 	}
 
 	Object.assign(got, {...errors, mergeOptions});

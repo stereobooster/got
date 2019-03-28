@@ -19,7 +19,8 @@ export default async (options: any): Promise<number | undefined> => {
 	}
 
 	if (isFormData(body)) {
-		return promisify(body.getLength.bind(body))();
+		promisify(body.getLength.bind(body))();
+		return undefined;
 	}
 
 	if (body instanceof fs.ReadStream) {

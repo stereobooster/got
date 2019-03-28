@@ -1,5 +1,5 @@
 import util from 'util';
-import http from 'http';
+import http, { Server } from 'http';
 import https from 'https';
 import getPort from 'get-port';
 import pem from 'pem';
@@ -8,10 +8,20 @@ export const host = 'localhost';
 
 const createCertificate = util.promisify(pem.createCertificate);
 
+type TestServer = Server & {
+	host?: string;
+	port?: number;
+	url?: string;
+	protocol?: 'http' | 'https';
+	caRootCert?: string;
+	listen?: any;
+	close?: any;
+}
+
 export const createServer = async () => {
 	const port = await getPort();
 
-	const server = http.createServer((request, response) => {
+	const server: TestServer = http.createServer((request, response) => {
 		const event = decodeURI(request.url);
 		if (server.listeners(event).length === 0) {
 			response.writeHead(404, 'Not Found');
@@ -19,7 +29,7 @@ export const createServer = async () => {
 		} else {
 			server.emit(event, request, response);
 		}
-	}) as any;
+	});
 
 	server.host = host;
 	server.port = port;
@@ -59,9 +69,9 @@ export const createSSLServer = async () => {
 	const key = keys.clientKey;
 	const cert = keys.certificate;
 
-	const server = https.createServer({cert, key}, (request, response) => {
+	const server: TestServer = https.createServer({cert, key}, (request, response) => {
 		server.emit(request.url, request, response);
-	}) as any;
+	});
 
 	server.host = host;
 	server.port = port;

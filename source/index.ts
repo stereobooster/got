@@ -1,7 +1,8 @@
+import { DefaultOptions } from './utils/types';
 import packageJson from '../package.json';
 import create from './create';
 
-const defaults = {
+const defaults: DefaultOptions = {
 	options: {
 		method: 'GET',
 		retry: {

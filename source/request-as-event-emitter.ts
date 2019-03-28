@@ -1,41 +1,53 @@
+import { Timings, Request } from './utils/types';
+import {CookieJar} from 'tough-cookie';
 import urlLib, {URL, URLSearchParams} from 'url'; // TODO: Use the `URL` global when targeting Node.js 10
 import util from 'util';
 import EventEmitter from 'events';
 import {Transform as TransformStream} from 'stream';
 import http from 'http';
 import https from 'https';
+// @ts-ignore
 import CacheableRequest from 'cacheable-request';
 import toReadableStream from 'to-readable-stream';
 import is from '@sindresorhus/is';
+// @ts-ignore
 import timer from '@szmarczak/http-timer';
 import timedOut, {TimeoutError as TimedOutTimeoutError} from './utils/timed-out';
 import getBodySize from './utils/get-body-size';
 import isFormData from './utils/is-form-data';
 import getResponse from './get-response';
 import {uploadProgress} from './progress';
-import {CacheError, UnsupportedProtocolError, MaxRedirectsError, RequestError, TimeoutError} from './errors';
+import { CacheError, UnsupportedProtocolError, MaxRedirectsError, RequestError, TimeoutError, GotError, HTTPError } from './errors';
 import urlToOptions from './utils/url-to-options';
+
+import {Options} from './utils/types';
 
 const getMethodRedirectCodes = new Set([300, 301, 302, 303, 304, 305, 307, 308]);
 const allMethodRedirectCodes = new Set([300, 303, 307, 308]);
 
 const withoutBody = new Set(['GET', 'HEAD']);
 
-export default (options, input?: TransformStream) => {
+interface SpecialEventEmitter extends EventEmitter {
+	retry: (error: HTTPError) => void | boolean;
+	abort: () => void;
+}
+
+export default (options: Options, input?: TransformStream) => {
 	const emitter = new EventEmitter();
-	const redirects = [];
-	let currentRequest;
-	let requestUrl;
-	let redirectString;
-	let uploadBodySize;
+	const redirects: string[] = [];
+	let currentRequest: Options["request"];
+	let requestUrl: string;
+	let redirectString: string;
+	let uploadBodySize: number | undefined;
 	let retryCount = 0;
 	let shouldAbort = false;
 
 	const setCookie = options.cookieJar ? util.promisify(options.cookieJar.setCookie.bind(options.cookieJar)) : null;
-	const getCookieString = options.cookieJar ? util.promisify(options.cookieJar.getCookieString.bind(options.cookieJar)) : null;
+	const getCookieString = options.cookieJar ? util.promisify<string, CookieJar.GetCookiesOptions>(options.cookieJar.getCookieString.bind(options.cookieJar)) : null;
 	const agents = is.object(options.agent) ? options.agent : null;
 
-	const emitError = async error => {
+	const emitError = async (error: GotError) => {
+		if (!options.hooks || !options.hooks.beforeError) return;
 		try {
 			for (const hook of options.hooks.beforeError) {
 				// eslint-disable-next-line no-await-in-loop
@@ -48,7 +60,7 @@ export default (options, input?: TransformStream) => {
 		}
 	};
 
-	const get = async options => {
+	const get = async (options: Options) => {
 		const currentUrl = redirectString || requestUrl;
 
 		if (options.protocol !== 'http:' && options.protocol !== 'https:') {
@@ -77,15 +89,15 @@ export default (options, input?: TransformStream) => {
 			fn = electron.net || electron.remote.net;
 		}
 
-		if (options.cookieJar) {
+		if (options.cookieJar && getCookieString) {
 			const cookieString = await getCookieString(currentUrl, {});
 
-			if (is.nonEmptyString(cookieString)) {
+			if (is.nonEmptyString(cookieString) && options.headers) {
 				options.headers.cookie = cookieString;
 			}
 		}
 
-		let timings;
+		let timings: Timings;
 		const handleResponse = async response => {
 			try {
 				/* istanbul ignore next: fixes https://github.com/electron/electron/blob/cbb460d47628a7a146adf4419ed48550a98b2923/lib/browser/api/net.js#L59-L65 */
@@ -113,8 +125,8 @@ export default (options, input?: TransformStream) => {
 				};
 
 				const rawCookies = response.headers['set-cookie'];
-				if (options.cookieJar && rawCookies) {
-					await Promise.all(rawCookies.map(rawCookie => setCookie(rawCookie, response.url)));
+				if (options.cookieJar && rawCookies && setCookie) {
+					await Promise.all(rawCookies.map((rawCookie: string) => setCookie(rawCookie, response.url)));
 				}
 
 				if (options.followRedirect && 'location' in response.headers) {
@@ -140,13 +152,15 @@ export default (options, input?: TransformStream) => {
 
 						const redirectOptions = {
 							...options,
-							port: null,
+							port: undefined,
 							...urlToOptions(redirectURL)
 						};
 
-						for (const hook of options.hooks.beforeRedirect) {
-							// eslint-disable-next-line no-await-in-loop
-							await hook(redirectOptions);
+						if (options.hooks && options.hooks.beforeRedirect) {
+							for (const hook of options.hooks.beforeRedirect) {
+								// eslint-disable-next-line no-await-in-loop
+								await hook(redirectOptions);
+							}
 						}
 
 						emitter.emit('redirect', response, redirectOptions);
@@ -162,7 +176,7 @@ export default (options, input?: TransformStream) => {
 			}
 		};
 
-		const handleRequest = request => {
+		const handleRequest = (request: Request) => {
 			if (shouldAbort) {
 				request.abort();
 				return;
@@ -170,7 +184,7 @@ export default (options, input?: TransformStream) => {
 
 			currentRequest = request;
 
-			request.on('error', error => {
+			request.on('error', (error: GotError) => {
 				if (request.aborted || error.message === 'socket hang up') {
 					return;
 				}
@@ -181,8 +195,7 @@ export default (options, input?: TransformStream) => {
 					error = new RequestError(error, options);
 				}
 
-				// TODO: Properly type this
-				if ((emitter as any).retry(error) === false) {
+				if ((emitter as SpecialEventEmitter).retry && (emitter as SpecialEventEmitter).retry(error) === false) {
 					emitError(error);
 				}
 			});
@@ -223,7 +236,7 @@ export default (options, input?: TransformStream) => {
 			const cacheableRequest = new CacheableRequest(fn.request, options.cache);
 			const cacheRequest = cacheableRequest(options, handleResponse);
 
-			cacheRequest.once('error', error => {
+			cacheRequest.once('error', (error: GotError) => {
 				if (error instanceof CacheableRequest.RequestError) {
 					emitError(new RequestError(error, options));
 				} else {
@@ -242,28 +255,31 @@ export default (options, input?: TransformStream) => {
 		}
 	};
 
-	// TODO: Properly type this
-	(emitter as any).retry = error => {
+	(emitter as SpecialEventEmitter).retry = (error: HTTPError) => {
 		let backoff;
 
-		try {
-			backoff = options.retry.retries(++retryCount, error);
-		} catch (error2) {
-			emitError(error2);
-			return;
+		if (is.object(options.retry) && is.boundFunction(options.retry.retries)) {
+			try {
+				backoff = options.retry.retries(++retryCount, error);
+			} catch (error2) {
+				emitError(error2);
+				return;
+			}
 		}
 
 		if (backoff) {
-			const retry = async options => {
-				try {
-					for (const hook of options.hooks.beforeRetry) {
-						// eslint-disable-next-line no-await-in-loop
-						await hook(options, error, retryCount);
-					}
+			const retry = async (options: Options) => {
+				if (options.hooks && options.hooks.beforeRetry) {
+					try {
+						for (const hook of options.hooks.beforeRetry) {
+							// eslint-disable-next-line no-await-in-loop
+							await hook(options, error, retryCount);
+						}
 
-					await get(options);
-				} catch (error) {
-					emitError(error);
+						await get(options);
+					} catch (error) {
+						emitError(error);
+					}
 				}
 			};
 
@@ -274,8 +290,7 @@ export default (options, input?: TransformStream) => {
 		return false;
 	};
 
-	// TODO: Properly type this
-	(emitter as any).abort = () => {
+	(emitter as SpecialEventEmitter).abort = () => {
 		if (currentRequest) {
 			currentRequest.abort();
 		} else {
@@ -285,9 +300,15 @@ export default (options, input?: TransformStream) => {
 
 	setImmediate(async () => {
 		try {
-			for (const hook of options.hooks.beforeRequest) {
-				// eslint-disable-next-line no-await-in-loop
-				await hook(options);
+			if (options.hooks && options.hooks.beforeRequest) {
+				for (const hook of options.hooks.beforeRequest) {
+					// eslint-disable-next-line no-await-in-loop
+					await hook(options);
+				}
+			}
+
+			if (!options.headers) {
+				throw new TypeError('The `headers` option is required');
 			}
 
 			// Serialize body
@@ -295,7 +316,7 @@ export default (options, input?: TransformStream) => {
 			const isForm = !is.nullOrUndefined(options.form);
 			const isJSON = !is.nullOrUndefined(options.json);
 			const isBody = !is.nullOrUndefined(body);
-			if ((isBody || isForm || isJSON) && withoutBody.has(options.method)) {
+			if ((isBody || isForm || isJSON) && options.method && withoutBody.has(options.method)) {
 				throw new TypeError(`The \`${options.method}\` method cannot be used with a body`);
 			}
 
@@ -318,6 +339,7 @@ export default (options, input?: TransformStream) => {
 				headers['content-type'] = headers['content-type'] || 'application/x-www-form-urlencoded';
 				options.body = (new URLSearchParams(options.form)).toString();
 			} else if (isJSON) {
+
 				headers['content-type'] = headers['content-type'] || 'application/json';
 				options.body = JSON.stringify(options.json);
 			}
@@ -331,7 +353,7 @@ export default (options, input?: TransformStream) => {
 			}
 
 			if (is.undefined(headers['content-length']) && is.undefined(headers['transfer-encoding'])) {
-				if ((uploadBodySize > 0 || options.method === 'PUT') && !is.undefined(uploadBodySize)) {
+				if (!is.undefined(uploadBodySize) && (uploadBodySize > 0 || options.method === 'PUT')) {
 					headers['content-length'] = uploadBodySize;
 				}
 			}
@@ -348,5 +370,5 @@ export default (options, input?: TransformStream) => {
 		}
 	});
 
-	return emitter;
+	return emitter as SpecialEventEmitter;
 };

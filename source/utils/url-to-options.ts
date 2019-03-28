@@ -15,7 +15,7 @@ export interface URLOptions {
 	auth?: string;
 }
 
-export default (url: any): URLOptions => {
+export default (url: URL): URLOptions => {
 	const options: URLOptions = {
 		protocol: url.protocol,
 		hostname: url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname,
